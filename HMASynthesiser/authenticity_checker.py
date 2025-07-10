@@ -1,9 +1,7 @@
-""" Please update the file path name with the correct path in line number 31"""
-
-
+#!/usr/bin/env python3
 """
 Fixed Synthetic Data Authenticity Checker
-Comprehensive validation with intelligent column filtering for realistic scoring
+Smart join approach for English category comparison
 """
 
 import pandas as pd
@@ -15,7 +13,8 @@ import os
 import warnings
 warnings.filterwarnings('ignore')
 
-
+# Define columns that should be excluded from categorical overlap scoring
+# These are expected to be 0% overlap (synthetic IDs, timestamps, etc.)
 EXCLUDE_FROM_CATEGORICAL_SCORING = {
     'order_id', 'customer_id', 'product_id', 'seller_id', 'review_id',
     'order_purchase_timestamp', 'order_approved_at', 'order_delivered_carrier_date', 
@@ -59,6 +58,128 @@ def load_data():
             print(f"   ⚠️ Could not load synthetic {table_name}")
     
     return real_data, synthetic_data
+
+def prepare_products_with_english_categories(real_products):
+    """Join real products with English translations for fair comparison"""
+    print(f"🔄 Starting category translation process...")
+    print(f"📊 Input products shape: {real_products.shape}")
+    
+    try:
+        # Load translation CSV
+        translation_df = pd.read_csv('product_category_name_translation.csv')
+        print(f"✅ Translation file loaded successfully: {translation_df.shape}")
+        print(f"📋 Available columns: {list(translation_df.columns)}")
+        
+        
+        portuguese_col = 'product_category_name'
+        english_col = 'product_category_name_english'
+        
+        # Verify columns exist
+        if portuguese_col not in translation_df.columns:
+            print(f"❌ Portuguese column '{portuguese_col}' not found!")
+            print(f"Available columns: {list(translation_df.columns)}")
+            return real_products
+            
+        if english_col not in translation_df.columns:
+            print(f"❌ English column '{english_col}' not found!")
+            print(f"Available columns: {list(translation_df.columns)}")
+            return real_products
+        
+        print(f"✅ Found both columns: '{portuguese_col}' and '{english_col}'")
+        
+        # Show sample translations
+        print(f"📋 Sample translations from CSV:")
+        for i in range(min(5, len(translation_df))):
+            port = translation_df.iloc[i][portuguese_col]
+            eng = translation_df.iloc[i][english_col]
+            print(f"   {port} → {eng}")
+        
+        # Find category column in products table
+        product_category_col = None
+        for col in real_products.columns:
+            if 'category' in col.lower():
+                product_category_col = col
+                break
+        
+        if not product_category_col:
+            print("❌ No category column found in products table")
+            print(f"Available columns in products: {list(real_products.columns)}")
+            return real_products
+        
+        print(f"✅ Products category column: '{product_category_col}'")
+        
+        # Show sample Portuguese categories from products
+        print(f"📋 Sample Portuguese categories from products:")
+        sample_categories = real_products[product_category_col].value_counts().head(5)
+        print(sample_categories)
+        
+        # Create a simple dictionary mapping for direct replacement
+        print(f"🔄 Creating translation dictionary...")
+        translation_dict = dict(zip(
+            translation_df[portuguese_col].str.strip(),  # Remove any whitespace
+            translation_df[english_col].str.strip()
+        ))
+        
+        print(f"✅ Created translation dictionary with {len(translation_dict)} mappings")
+        print(f"📋 Sample mappings:")
+        for i, (port, eng) in enumerate(list(translation_dict.items())[:5]):
+            print(f"   '{port}' → '{eng}'")
+        
+        # Create a copy of the products dataframe
+        products_translated = real_products.copy()
+        
+        # Apply translation using map
+        print(f"🔄 Applying translations...")
+        original_categories = products_translated[product_category_col].copy()
+        
+        # Apply the translation
+        products_translated[product_category_col] = products_translated[product_category_col].str.strip().map(translation_dict)
+        
+        # Handle unmapped categories (keep original)
+        unmapped_mask = products_translated[product_category_col].isnull()
+        unmapped_count = unmapped_mask.sum()
+        
+        if unmapped_count > 0:
+            print(f"⚠️ {unmapped_count} categories couldn't be translated, keeping original")
+            products_translated.loc[unmapped_mask, product_category_col] = original_categories[unmapped_mask]
+            
+            # Show which categories couldn't be translated
+            unmapped_categories = original_categories[unmapped_mask].unique()
+            print(f"📋 Unmapped categories: {list(unmapped_categories)[:10]}")
+        
+        # Verify the translation worked
+        print(f"🔍 Verification - Categories after translation:")
+        translated_categories = products_translated[product_category_col].value_counts().head(5)
+        print(translated_categories)
+        
+        # Count successful translations
+        translated_count = len(products_translated) - unmapped_count
+        total_count = len(products_translated)
+        success_rate = (translated_count / total_count) * 100
+        
+        print(f"📊 Translation Results:")
+        print(f"   ✅ Successfully translated: {translated_count:,}/{total_count:,} ({success_rate:.1f}%)")
+        print(f"   ⚠️ Kept as original: {unmapped_count:,}")
+        
+        # Final check - are the top categories now in English?
+        top_categories = products_translated[product_category_col].value_counts().head(3).index.tolist()
+        english_pattern = any(cat in ['bed_bath_table', 'sports_leisure', 'furniture_decor', 'health_beauty'] for cat in top_categories)
+        
+        if english_pattern:
+            print(f"✅ SUCCESS: Top categories are now in English!")
+            print(f"📋 Top English categories: {top_categories}")
+        else:
+            print(f"❌ WARNING: Top categories still appear to be Portuguese")
+            print(f"📋 Top categories: {top_categories}")
+        
+        return products_translated
+        
+    except Exception as e:
+        print(f"❌ Error in translation: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        print(f"📋 Returning original products data")
+        return real_products
 
 def statistical_comparison(real_data, synthetic_data):
     """Compare statistical properties between real and synthetic data"""
@@ -135,6 +256,11 @@ def categorical_comparison(real_data, synthetic_data):
             real_df = real_data[table_name]
             synthetic_df = synthetic_data[table_name]
             
+            # For products table, prepare with English categories
+            if table_name == 'products':
+                print("🔗 Preparing products table with English categories for fair comparison...")
+                real_df = prepare_products_with_english_categories(real_df)
+            
             print(f"\n🔍 {table_name.upper()} Categorical Analysis:")
             
             categorical_cols = real_df.select_dtypes(include=['object']).columns
@@ -167,7 +293,12 @@ def categorical_comparison(real_data, synthetic_data):
                         else:
                             exclusion_reason = "(Synthetic by design)"
                     
-                    print(f"   📊 {col} {exclusion_reason}:")
+                    # Special note for English categories
+                    english_comparison_note = ""
+                    if table_name == 'products' and 'category' in col.lower():
+                        english_comparison_note = "🌐 (English vs English)"
+                    
+                    print(f"   📊 {col} {exclusion_reason} {english_comparison_note}:")
                     print(f"      Real categories: {total_real}")
                     print(f"      Synthetic categories: {len(synthetic_categories)}")
                     print(f"      Category overlap: {overlap}/{total_real} ({overlap_percentage:.1f}%)")
@@ -183,13 +314,16 @@ def categorical_comparison(real_data, synthetic_data):
                         print(f"      ⚠️ Excluded from final categorical score {exclusion_reason}")
                     else:
                         print(f"      ✅ Included in final categorical score")
+                        if english_comparison_note:
+                            print(f"      🌐 Fair English-to-English comparison applied")
                     
                     table_results[col] = {
                         'overlap_percentage': overlap_percentage,
                         'real_categories': total_real,
                         'synthetic_categories': len(synthetic_categories),
                         'excluded_from_scoring': excluded_from_scoring,
-                        'exclusion_reason': exclusion_reason
+                        'exclusion_reason': exclusion_reason,
+                        'english_comparison': bool(english_comparison_note)
                     }
             
             categorical_results[table_name] = table_results
@@ -392,10 +526,10 @@ def generate_authenticity_report(comparison_results, categorical_results, integr
 def main():
     """Main authenticity checking function"""
     print("🔍 ENHANCED SYNTHETIC DATA AUTHENTICITY CHECKER")
-    print("🧠 Smart Column Filtering for Realistic Scoring")
+    print("🧠 Smart Column Filtering + English Category Join")
     print("=" * 60)
     
-    # Load data
+    # Load data 
     real_data, synthetic_data = load_data()
     
     if not real_data or not synthetic_data:
@@ -416,7 +550,7 @@ def main():
     
     print(f"\n📋 Enhanced authenticity check complete!")
     print(f"🎯 Final Score: {overall_score:.3f}")
-    print("✨ Your synthetic data quality assessment is now much more accurate!")
+    print("✨ Fair English-to-English comparison using smart join approach!")
 
 if __name__ == "__main__":
     main()
